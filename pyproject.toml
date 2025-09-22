@@ -1,0 +1,21 @@
+[project]
+name = "cn-ocr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "astor>=0.8.1",
+    "click>=8.3.0",
+    "decorator>=5.2.1",
+    "google>=3.0.0",
+    "h11>=0.16.0",
+    "httpx>=0.28.1",
+    "lazy-loader>=0.4",
+    "numpy>=2.3.3",
+    "opt-einsum>=3.4.0",
+    "paddleocr>=3.2.0",
+    "pathlib>=1.0.1",
+    "scipy>=1.16.2",
+    "starlette>=0.48.0",
+]
