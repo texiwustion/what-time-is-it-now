@@ -24,3 +24,11 @@ uv run app/withffmpeg.py
 ```
 
 如果不懂就去问 LLMs
+
+# 截图
+
+成功率98%的时间识别
+![](time_1.png)
+
+设定>=20分钟为精彩瞬间
+![](time_2.png)

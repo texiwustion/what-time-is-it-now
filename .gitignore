@@ -14,4 +14,4 @@ output
 .cursor*
 .specstory
 t.txt
-*.png
+/*.png
