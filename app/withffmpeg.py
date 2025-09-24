@@ -280,7 +280,7 @@ class FFmpegStreamOCR:
                 process_time = time.time() - start_time
                 logger.info(f"✅ OCR识别完成，耗时: {process_time*1000:.1f}ms")
 
-                print(f"🔍 OCR结果: {ocr_result.texts}")
+                # print(f"🔍 OCR结果: {ocr_result.texts}")
                 logger.info(f"📝 识别到{len(ocr_result.texts)}行文本")
                 for i, text_line in enumerate(ocr_result.texts):
                     logger.info(f"   第{i+1}行: '{text_line.text}' (置信度: {text_line.confidence:.3f})")
@@ -289,6 +289,11 @@ class FFmpegStreamOCR:
                 logger.debug("🧠 开始内容分析...")
                 content_analysis = self.content_analyzer.analyze_texts(ocr_result.texts)
                 logger.info(f"🎯 分析结果 - 时间: {content_analysis['has_time']}, 重播: {content_analysis['is_replay']}")
+                if (content_analysis['has_time']):
+                    print(f"🕒 时间: {content_analysis['time_texts']}")
+                    print(f"关键时刻：{content_analysis['ge_20_min']}")
+                if (content_analysis['is_replay']):
+                    print(f"📺 重播: {content_analysis['replay_indicators']}")
                 
                 # 构建结果
                 result = {
@@ -411,15 +416,16 @@ class ContentAnalyzer:
         import re
         self.re = re
         
-        # 时间格式模式
+        # 时间格式模式（更稳健）：匹配任意位置的 MM:SS / MM.SS / MM：SS / MM ． SS，避免被其他数字粘连
+        # 使用负向/正向断言，防止被更长数字串吞并
+        self.time_regex = self.re.compile(r"(?<!\d)(\d{1,2})[\:：\.  ][\s]?(\d{2})(?!\d)")
+        
+        # 兼容旧逻辑（保留占位，内部统一用 time_regex）
         self.time_patterns = [
-            r'\d{1,2}:\d{2}:\d{2}',  # HH:MM:SS
-            r'\d{1,2}:\d{2}',        # HH:MM
-            r'\d{4}-\d{2}-\d{2}',    # YYYY-MM-DD
-            r'\d{2}/\d{2}/\d{4}',    # MM/DD/YYYY
-            r'\d{4}\.\d{2}\.\d{2}',  # YYYY.MM.DD
-            r'\d{2}月\d{1,2}日',     # 中文日期格式
-            r'\d{4}年\d{1,2}月\d{1,2}日', # 完整中文日期
+            r'时间(\d{2}):(\d{2})',      # 时间MM:SS
+            r'时间(\d{2})\.(\d{2})',     # 时间MM.SS
+            r'(\d{2}):(\d{2})',          # MM:SS (单独的时间)
+            r'(\d{2})\.(\d{2})',         # MM.SS (单独的时间)
         ]
         
         # 重播相关关键词
@@ -444,12 +450,83 @@ class ContentAnalyzer:
             '正在播出',
         ]
     
+    def _normalize_for_time(self, text: str) -> str:
+        """将文本规整为便于时间识别的形态。
+        - 全角转半角（NFKC）
+        - 常见混淆字符替换：'O'->'0', 'o'->'0', '．'->'.', '：'->':'
+        - 去除多余空格
+        """
+        import unicodedata
+        t = unicodedata.normalize('NFKC', text)
+        repl = {
+            'O': '0', 'o': '0', '〇': '0', '零': '0',
+            '：': ':', '。': '.', '．': '.', '·': '.',
+        }
+        for k, v in repl.items():
+            t = t.replace(k, v)
+        return t
+    
     def is_time_text(self, text: str) -> bool:
-        """判断是否为时间格式"""
-        for pattern in self.time_patterns:
-            if self.re.search(pattern, text):
-                return True
-        return False
+        """判断是否为时间格式（使用归一化 + 稳健正则）"""
+        norm = self._normalize_for_time(text)
+        return self.time_regex.search(norm) is not None
+    
+    def extract_time(self, text: str) -> Optional[str]:
+        """从文本中提取时间并转换为标准格式（HH:MM:SS）。仅返回首个匹配。"""
+        from datetime import time as _time
+        norm = self._normalize_for_time(text)
+        m = self.time_regex.search(norm)
+        if not m:
+            return None
+        mm = int(m.group(1))
+        ss = int(m.group(2))
+        if not (0 <= mm <= 99 and 0 <= ss < 60):
+            return None
+        try:
+            return _time(hour=0, minute=mm, second=ss).strftime("%H:%M:%S")
+        except Exception:
+            return f"00:{mm:02d}:{ss:02d}"
+    
+    def extract_time_sec(self, text: str) -> Optional[int]:
+        """提取首个时间并返回秒数。"""
+        norm = self._normalize_for_time(text)
+        m = self.time_regex.search(norm)
+        if not m:
+            return None
+        mm = int(m.group(1))
+        ss = int(m.group(2))
+        if 0 <= mm <= 99 and 0 <= ss < 60:
+            return mm * 60 + ss
+        return None
+    
+    def extract_all_times(self, ocr_lines) -> list:
+        """从多行 OCR 文本中提取全部时间，返回带标准化字段。"""
+        items = []
+        for line in ocr_lines:
+            text = getattr(line, 'text', '') or ''
+            norm = self._normalize_for_time(text)
+            for m in self.time_regex.finditer(norm):
+                mm = int(m.group(1))
+                ss = int(m.group(2))
+                if 0 <= mm <= 99 and 0 <= ss < 60:
+                    items.append({
+                        'text': text,
+                        'norm': f"{mm:02d}:{ss:02d}",
+                        'mm': mm,
+                        'ss': ss,
+                        'sec': mm * 60 + ss,
+                        'confidence': getattr(line, 'confidence', None),
+                        'bbox': getattr(line, 'bbox', None),
+                    })
+        return items
+    
+    def has_reached_20_min(self, ocr_lines) -> bool:
+        """判断 OCR 行文本中是否存在 >= 20:00 的时间。"""
+        times = self.extract_all_times(ocr_lines)
+        if not times:
+            return False
+        max_sec = max(t['sec'] for t in times)
+        return max_sec >= 20 * 60
     
     def is_replay_indicator(self, text: str) -> bool:
         """判断是否为重播指示器"""
@@ -471,24 +548,23 @@ class ContentAnalyzer:
             'replay_indicators': [],
             'is_replay': False,
             'has_time': False,
+            'ge_20_min': False,
+            'max_time_sec': None,
         }
         
+        # 提取时间
+        all_times = self.extract_all_times(ocr_lines)
+        if all_times:
+            result['time_texts'] = all_times
+            result['has_time'] = True
+            result['max_time_sec'] = max(t['sec'] for t in all_times)
+            result['ge_20_min'] = result['max_time_sec'] >= 20 * 60
+        
+        # 提取重播
         for line in ocr_lines:
             text = line.text.strip()
-            # print(text, self.is_time_text(text), self.is_replay_indicator(text))
             if not text:
                 continue
-                
-            # 检查时间
-            if self.is_time_text(text):
-                result['time_texts'].append({
-                    'text': text,
-                    'confidence': line.confidence,
-                    'bbox': line.bbox
-                })
-                result['has_time'] = True
-            
-            # 检查重播指示器
             if self.is_replay_indicator(text):
                 result['replay_indicators'].append({
                     'text': text,
@@ -510,7 +586,7 @@ def time_text_filter(text: str) -> bool:
 def main():
     """主函数示例"""
     # 流媒体URL（替换为实际的HLS或DASH地址）
-    stream_url = "https://d1--cn-gotcha204b.bilivideo.com/live-bvc/347023/live_50329485_5259019_2500/index.m3u8?expires=1759531479&len=0&oi=1001173025&pt=html5&qn=250&trid=10075e969941df9175ba3077fb579668d101&bmt=1&sigparams=cdn,expires,len,oi,pt,qn,trid,bmt&cdn=cn-gotcha204&sign=ac516b14e2fc50fcb682f5aabc3d3921&site=f9adc59ad6fc66027c4b8e05a2d74921&free_type=0&mid=0&sche=ban&bvchls=1&trace=4&isp=fx&rg=Central&pv=Hubei&deploy_env=prod&media_type=0&codec=0&suffix=2500&origin_bitrate=1806&score=1&p2p_type=-1&info_source=cache&pp=rtmp&sk=fc53131b8465f6aa53a11413bcfe3ef1&source=puv3_onetier&hdr_type=0&hot_cdn=909701&flvsk=25ed97f12ce8b5c35ad89e32d6451a68&sl=1&vd=bc&src=puv3&order=2"
+    stream_url = "https://d1--cn-gotcha204b.bilivideo.com/live-bvc/211604/live_50329485_5259019_2500/index.m3u8?expires=1758716284&len=0&oi=1001173025&pt=html5&qn=250&trid=10071bb3e5ef9e8578f96449d5f44268d3d3&bmt=1&sigparams=cdn,expires,len,oi,pt,qn,trid,bmt&cdn=cn-gotcha204&sign=4821bebd022419c57f0d62ca3f6f5392&site=c8ad522035124d331d16f8b106170aef&free_type=0&mid=0&sche=ban&bvchls=1&trace=4&isp=fx&rg=Central&pv=Hubei&origin_bitrate=2242&media_type=0&deploy_env=prod&hdr_type=0&pp=rtmp&flvsk=e9111b082c7df4c25b0b5ceed178b4b3&source=puv3_onetier&score=1&info_source=cache&sk=f46bd97a996b066e2d719403bf9cdaca&p2p_type=-1&sl=2&hot_cdn=909709&suffix=2500&codec=0&vd=bc&src=puv3&order=2"
     
     # 创建OCR引擎
     ocr_engine = PaddleOCREngine()
@@ -520,7 +596,7 @@ def main():
         stream_url=stream_url,
         ocr_engine=ocr_engine,
         crop_ratio=0.3,  # 裁剪右上角30%区域
-        fps=2,           # 每秒2帧
+        fps=1,           # 每秒2帧
         scale_width=1280 # 缩放到1280像素宽
     )
     
